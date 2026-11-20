@@ -14,7 +14,9 @@ const VARS = {
   participaciones_foro: { label: 'Mensajes en foro', unit: 'mensajes', kind: 'discreta', dec: 0 },
   asistencia_sincronica: { label: 'Sesiones sincrónicas', unit: 'de 8', kind: 'discreta', dec: 0 },
   casos: { label: 'Análisis de casos', unit: '0–10', kind: 'continua', dec: 1 },
+  carteles: { label: 'Carteles', unit: '0–10', kind: 'continua', dec: 1 },
   ensayos: { label: 'Ensayos', unit: '0–10', kind: 'continua', dec: 1 },
+  exposicion: { label: 'Exposición', unit: '0–10', kind: 'continua', dec: 1 },
   calificacion_final: { label: 'Calificación final', unit: '0–10', kind: 'continua', dec: 2 },
   dominio_tic_codigo: { label: 'Dominio de TIC', unit: 'código ordinal', kind: 'ordinal', dec: 0, cats: ['Básico', 'Intermedio', 'Avanzado'] },
   modalidad_preferida: { label: 'Modalidad preferida', unit: 'código nominal', kind: 'nominal', dec: 0 },
@@ -31,33 +33,39 @@ const VARS = {
   carrera: { label: 'Carrera', unit: 'código nominal', kind: 'nominal', dec: 0 },
 };
 const AX = ['x', 'y', 'z'];
+const RAMP = ['#f59e0b', '#db2777', '#4c1d95'];            // bajo → alto (secuencial)
+const CAT_COLORS = ['#2563eb', '#db2777', '#16a34a', '#f59e0b', '#7c3aed'];
+const CAT_NAMES = ['azul', 'rosa', 'verde', 'ámbar', 'morado'];
 const AX_COLOR = { x: COLORS.axisX, y: COLORS.axisY, z: COLORS.axisZ };
 
 export default class Scene2 extends BaseScene {
   constructor(app) {
     super(app, 'escena2', { title: 'Representar dimensiones', short: 'Dimensiones' });
-    this.state = { dims: 1, axes: { x: 'minutos_plataforma', y: 'participaciones_foro', z: 'casos' }, norm: 'minmax', selected: null, auto: false };
-    this.cameraPreset = { position: [1.3, 1.85, 1.35], target: [0, 1.15, -2] };
+    this.state = { dims: 1, axes: { x: 'v1', y: 'v1', z: 'v1' }, norm: 'minmax', selected: null, auto: false,
+      view: 'cartesian', colorVar: null, sizeVar: null,
+      parVars: [] };
+    this.cameraPreset = { position: [1.2, 1.95, 1.6], target: [0, 1.3, -2] };
     this.rotTarget = 0.5;
     this.zoomTarget = 1;
   }
 
   async init() {
-    const rows = this.app.data.estudiantes;
-    this.rows = rows;
-    VARS.carrera.cats = this.app.data.variables.carrera.categorias;
-    VARS.modalidad_preferida.cats = this.app.data.variables.modalidad_preferida.categorias;
-    // Estadísticos descriptivos para la normalización explícita
+    // Filas propias (solo identificador y nombre): las variables v1, v2… se generan al agregarlas.
+    this.rows = this.app.data.estudiantes.map((r) => ({ id: r.id, nombre: r.nombre }));
+    const rows = this.rows;
+    for (const k of Object.keys(VARS)) delete VARS[k];
     this.stats = {};
-    for (const k of Object.keys(VARS)) {
-      const vals = rows.map((r) => this.raw(r, k));
-      const n = vals.length;
-      const mean = vals.reduce((a, b) => a + b, 0) / n;
-      const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1));
-      this.stats[k] = { min: Math.min(...vals), max: Math.max(...vals), mean, sd };
-    }
-    if (VARS.nivel_educativo_codigo) Object.assign(this.stats.nivel_educativo_codigo, { min: 1, max: 5 });
-    for (const [k, v] of Object.entries(VARS)) if (v.cats) Object.assign(this.stats[k], { min: 1, max: v.cats.length });
+    this.vlist = [];
+    this.nextType = 'continua';
+    this.labelMode = 'ocultar';   // vista limpia al inicio; el botón o la tecla E muestran las coordenadas
+    window.addEventListener('keydown', (e) => {
+      if ((e.key === 'e' || e.key === 'E') && this.app.current === this && !(e.target.closest && e.target.closest('input,select,textarea'))) this.toggleLabels();
+    });
+    // Factor común ficticio: hace que algunas variables queden correlacionadas entre sí
+    const rng = mulberry32(2026);
+    this.F = rows.map(() => gauss(rng));
+    this.addVariable('continua', false);
+    Object.assign(this.state, { numVars: ['v1'], catVars: [], shapeVar: null, labelVar: null, parVars: ['v1'] });
 
     // Pedestal
     const ped = new THREE.Mesh(new THREE.CylinderGeometry(0.95, 1.0, 0.36, 48), BaseScene.mat('#ffffff', { roughness: 0.6 }));
@@ -131,14 +139,177 @@ export default class Scene2 extends BaseScene {
     this.warn.visible = false;
     this.root.add(this.warn);
 
+    // Leyendas de las variables codificadas con color y tamaño (4.ª y 5.ª variable)
+    this.colorLegend = makeLabel('', { height: 0.05, border: '#db2777', maxWidthPx: 1100 });
+    this.colorLegend.position.set(-1.45, 1.75, 0.3);
+    this.sizeLegend = makeLabel('', { height: 0.05, border: '#475569', maxWidthPx: 1100 });
+    this.sizeLegend.position.set(-1.45, 1.63, 0.3);
+    this.colorLegend.visible = this.sizeLegend.visible = false;
+    this.root.add(this.colorLegend, this.sizeLegend);
+
+    // Coordenadas paralelas: tantos ejes como variables
+    this.par = new THREE.Group();
+    this.par.position.set(0, 0.5, 0.35);
+    this.par.visible = false;
+    this.root.add(this.par);
+    this.parMarkers = new THREE.Group();
+    this.par.add(this.parMarkers);
+    this.app.interaction.raycaster.params.Line.threshold = 0.02;
+
     this.layout();
   }
 
   raw(r, k) {
-    if (k === 'carrera') return VARS.carrera.cats.indexOf(r.carrera) + 1;
-    if (k === 'modalidad_preferida') return VARS.modalidad_preferida.cats.indexOf(r.modalidad_preferida) + 1;
+    const v = VARS[k];
+    if (v && v.cats && typeof r[k] === 'string') return v.cats.indexOf(r[k]) + 1;
     return r[k];
   }
+
+  // ---------- Variables genéricas v1, v2, v3… ----------
+  addVariable(type = 'continua', relayout = true) {
+    if (this.vlist.length >= 40) return;
+    const n = this.vlist.length + 1;
+    const key = `v${n}`;
+    const rng = mulberry32(7919 * n + 13);
+    const neg = rng() < 0.25 ? -1 : 1;
+    const load = neg * (0.15 + 0.8 * rng());           // fuerza de relación con el factor común
+    const e = Math.sqrt(1 - load * load);
+    const zs = this.rows.map((_, i) => load * this.F[i] + e * gauss(rng));
+    let meta;
+    if (type === 'discreta') {
+      this.rows.forEach((r, i) => { r[key] = Math.max(0, Math.min(10, Math.round(5 + 2 * zs[i]))); });
+      meta = { label: key, unit: '0–10', kind: 'discreta', dec: 0 };
+    } else if (type === 'ordinal') {
+      const cats = ['Nivel 1', 'Nivel 2', 'Nivel 3', 'Nivel 4', 'Nivel 5'];
+      this.rows.forEach((r, i) => { r[key] = cats[Math.max(1, Math.min(5, Math.round(3 + zs[i] * 1.1))) - 1]; });
+      meta = { label: key, unit: 'código ordinal', kind: 'ordinal', dec: 0, cats };
+    } else if (type === 'nominal') {
+      const cats = ['A', 'B', 'C', 'D'];
+      this.rows.forEach((r) => { r[key] = cats[Math.floor(rng() * cats.length)]; });
+      meta = { label: key, unit: 'código nominal', kind: 'nominal', dec: 0, cats };
+    } else {
+      this.rows.forEach((r, i) => { r[key] = Math.max(0, Math.min(10, Math.round((5 + 2 * zs[i]) * 10) / 10)); });
+      meta = { label: key, unit: '0–10', kind: 'continua', dec: 1 };
+    }
+    VARS[key] = meta;
+    this.computeStats(key);
+    this.vlist.push(key);
+    if (relayout) this.syncVars(true);
+  }
+
+  removeVariable() {
+    if (this.vlist.length <= 1) return;
+    const rest = this.vlist.slice(0, -1);
+    if (!rest.some((k) => this.isNum(k))) return;
+    const key = this.vlist.pop();
+    delete VARS[key]; delete this.stats[key];
+    this.rows.forEach((r) => { delete r[key]; });
+    this.syncVars(true);
+  }
+
+  computeStats(k) {
+    const vals = this.rows.map((r) => this.raw(r, k));
+    const n = vals.length;
+    const mean = vals.reduce((a, b) => a + b, 0) / n;
+    const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1)) || 1;
+    this.stats[k] = { min: Math.min(...vals), max: Math.max(...vals), mean, sd };
+    if (VARS[k].cats) Object.assign(this.stats[k], { min: 1, max: VARS[k].cats.length });
+    else Object.assign(this.stats[k], { min: 0, max: 10 });   // escala común 0–10
+  }
+
+  // ---------- Casos extremos: 0 en todo y 10 en todo ----------
+  refRow(val) {
+    const r = { nombre: val === 0 ? 'Mínimo' : 'Máximo', id: val === 0 ? 'MIN' : 'MAX', ref: true };
+    for (const k of this.vlist) r[k] = this.isNum(k) ? val : '—';
+    return r;
+  }
+
+  layoutRefs() {
+    const st = this.state;
+    if (!this.refs) {
+      this.refs = [0, 10].map((val) => {
+        const col = val === 0 ? '#0f172a' : '#dc2626';
+        const g = new THREE.Group();
+        const core = new THREE.Mesh(new THREE.SphereGeometry(0.038, 20, 14), new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.35, roughness: 0.3 }));
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.058, 0.006, 8, 32), new THREE.MeshBasicMaterial({ color: col }));
+        const lbl = makeLabel('', { height: 0.045, border: col, maxWidthPx: 1400 });
+        lbl.position.y = 0.09;
+        g.add(core, ring, lbl);
+        g.userData = { val, ring, lbl, target: new THREE.Vector3() };
+        this.plot.add(g);
+        this.reg(g, { onSelect: () => this.showRef(val) });
+        return g;
+      });
+    }
+    const par = st.view === 'parallel';
+    for (const g of this.refs) {
+      const { val } = g.userData;
+      g.visible = !par;
+      const t = g.userData.target.set(0, 0, 0);
+      if (this.starMode && this.starInfo) {
+        const { vars, dirs, A } = this.starInfo;
+        vars.forEach((k, i) => t.addScaledVector(dirs[i], (val / 10) * A));
+      } else {
+        this.activeAxes().forEach((a) => { t[a] = this.toAxis(st.axes[a], val); });
+      }
+      const nums = (st.numVars || []).map(() => val).join(', ');
+      g.userData.lbl.setText(this.labelMode === 'valores'
+        ? `${val === 0 ? 'Mínimo' : 'Máximo'} (${nums})`
+        : `${val === 0 ? 'Mínimo · 0 en todo' : 'Máximo · 10 en todo'}`);
+    }
+  }
+
+  showRef(val) {
+    const st = this.state;
+    const nums = st.numVars || [];
+    this.detail({
+      kicker: 'Caso extremo de referencia',
+      title: `${val === 0 ? 'Mínimo' : 'Máximo'} (${nums.map(() => val).join(', ')})`,
+      rows: nums.map((k) => [k, `${val} de 10`]),
+      text: val === 0
+        ? 'Una estudiante hipotética con 0 en todas las variables: queda en el origen. Ninguna estudiante real puede estar «antes» de este punto.'
+        : `Una estudiante hipotética con 10 en todas las variables: avanza el máximo en cada uno de los ${nums.length} ejes. Todas las estudiantes quedan entre el Mínimo y este punto.`,
+    });
+  }
+
+  toggleLabels(refresh = true) {
+    this.labelMode = this.labelMode === 'valores' ? 'ocultar' : 'valores';
+    this.layout();
+    if (refresh) this.refresh();
+  }
+
+  /** Nombre interpretable de un punto: «Ana (7, 3.5, 9 | A, N2)». */
+  pointName(r, mode = 'valores') {
+    if (mode === 'nombres') return r.nombre;
+    const st = this.state;
+    const nums = (st.numVars || []).map((k) => r[k]);
+    const cats = (st.catVars || []).map((k) => String(r[k]).replace('Nivel ', 'N'));
+    return `${r.nombre} (${nums.join(', ')}${cats.length ? ' | ' + cats.join(', ') : ''})`;
+  }
+
+  isNum(k) { const t = VARS[k].kind; return t === 'continua' || t === 'discreta'; }
+
+  /** Numéricas → un eje cada una. Categóricas → color, forma y etiqueta (en ese orden). */
+  syncVars(autoView = false) {
+    const st = this.state;
+    const nums = this.vlist.filter((k) => this.isNum(k));
+    const cats = this.vlist.filter((k) => !this.isNum(k));
+    st.numVars = nums;
+    st.catVars = cats;
+    st.dims = Math.max(1, Math.min(3, nums.length));
+    st.axes = { x: nums[0], y: nums[1] || nums[0], z: nums[2] || nums[0] };
+    st.colorVar = cats[0] || null;
+    st.shapeVar = cats[1] || null;
+    st.labelVar = null;
+    st.sizeVar = null;
+    st.parVars = [...nums];
+    const prev = st.view;
+    if (st.view === 'parallel' && nums.length < 2) st.view = 'cartesian';
+    if (st.selected !== null) { st.selected = null; this.detail(null); }
+    this.layout();
+    if (prev !== st.view) this.app.setCameraPreset(st.view === 'parallel' ? PAR_CAMERA : this.cameraPreset);
+  }
+
 
   /** Transforma un valor original a la coordenada del eje (0..L), de forma explícita. */
   toAxis(k, v) {
@@ -159,6 +330,16 @@ export default class Scene2 extends BaseScene {
   layout() {
     const st = this.state;
     const act = this.activeAxes();
+    const m = (st.numVars || []).length;
+    this.starMode = m > 3 && st.view !== 'parallel';
+    this.plotTarget = this.starMode ? new THREE.Vector3(0, -0.62, 0) : new THREE.Vector3(-L / 2, -L / 2, -L / 2);
+    if (this.starGroup) this.starGroup.visible = this.starMode;
+    if (this.starMode) {
+      for (const a of AX) { const o = this.axisObjs[a]; o.g.visible = o.title.visible = o.ticks.visible = false; }
+      this.gridXZ.visible = this.gridXY.visible = this.gridYZ.visible = false;
+      this.warn.visible = false;
+      this.layoutStar();
+    } else {
     // Posiciones objetivo
     for (const p of this.points) {
       const r = p.userData.row;
@@ -196,7 +377,185 @@ export default class Scene2 extends BaseScene {
       this.warn.setText(`${ord.label}: ordinal · solo el orden tiene sentido`, { color: '#fde68a', border: COLORS.indicator });
       this.warn.visible = true;
     } else this.warn.visible = false;
+    }
+    this.layoutRefs();
+    this.applyEncodings();
+    const par = st.view === 'parallel';
+    this.pivot.visible = !par;
+    this.par.visible = par;
+    if (par) { this.warn.visible = false; this.buildParallel(); }
     if (st.selected !== null) this.updateSelection();
+  }
+
+  // ---------- Ejes en estrella (4 o más variables numéricas) ----------
+  starDirs(m) {
+    const d = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+    for (let j = 0; j < m - 3; j++) {
+      const az = THREE.MathUtils.degToRad(200 + j * 137.5);
+      const el = THREE.MathUtils.degToRad(j % 2 ? 55 : 22);
+      d.push(new THREE.Vector3(Math.cos(el) * Math.cos(az), Math.sin(el), Math.cos(el) * Math.sin(az)).normalize());
+    }
+    return d.slice(0, m);
+  }
+
+  layoutStar() {
+    const st = this.state;
+    const vars = st.numVars;
+    const m = vars.length;
+    const dirs = this.starDirs(m);
+    // Longitud de cada eje: el Máximo (10 en todo) = suma de todos los ejes debe caber en la vista
+    const sum = dirs.reduce((acc, d) => acc.add(d), new THREE.Vector3());
+    const A = Math.min(L, 1.35 / Math.max(1e-6, sum.length()));
+    this.starInfo = { vars, dirs, A };
+    for (const p of this.points) {
+      const t = p.userData.target.set(0, 0, 0);
+      vars.forEach((k, i) => t.addScaledVector(dirs[i], this.unit01(k, p.userData.row) * A));
+    }
+    // Ejes
+    if (!this.starGroup) { this.starGroup = new THREE.Group(); this.plot.add(this.starGroup); }
+    const G = this.starGroup;
+    for (const ch of [...G.children]) { ch.traverse((o) => { if (!o.isSprite) o.geometry?.dispose(); if (o.material) { o.material.map?.dispose(); o.material.dispose(); } }); G.remove(ch); }
+    const Y = new THREE.Vector3(0, 1, 0);
+    vars.forEach((k, i) => {
+      const col = STAR_COLORS[i % STAR_COLORS.length];
+      const mat = new THREE.MeshStandardMaterial({ color: col, emissive: col, emissiveIntensity: 0.35 });
+      const g = new THREE.Group();
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, A, 10), mat);
+      shaft.position.y = A / 2;
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.07, 14), mat);
+      tip.position.y = A + 0.035;
+      g.add(shaft, tip);
+      g.quaternion.setFromUnitVectors(Y, dirs[i]);
+      G.add(g);
+      const v = VARS[k];
+      const lbl = makeLabel(`${i < 3 ? 'XYZ'[i] + ' · ' : ''}${v.label} (${v.unit})`, { height: 0.05, border: col });
+      lbl.position.copy(dirs[i]).multiplyScalar(A + 0.16);
+      G.add(lbl);
+      for (const val of [5, 10]) {
+        const tick = new THREE.Mesh(new THREE.SphereGeometry(0.012, 8, 6), mat);
+        tick.position.copy(dirs[i]).multiplyScalar((val / 10) * A);
+        const tl = makeLabel(String(val), { height: 0.032, fontSize: 36, bold: false });
+        tl.position.copy(tick.position).add(new THREE.Vector3(0, -0.045, 0));
+        G.add(tick, tl);
+      }
+    });
+    const o = makeLabel('origen = 0 en todos los ejes', { height: 0.045, bold: false });
+    o.position.set(0, -0.06, 0);
+    G.add(o);
+    this.starGroup.visible = true;
+  }
+
+  // Valor normalizado 0..1 de una variable (para color, tamaño y ejes paralelos)
+  unit01(k, r) {
+    const s = this.stats[k];
+    const v = this.raw(r, k);
+    if (this.state.norm === 'z' && !VARS[k].cats) return THREE.MathUtils.clamp(((v - s.mean) / s.sd + 3) / 6, 0, 1);
+    return (v - s.min) / (s.max - s.min || 1);
+  }
+
+  colorFor(k, r) {
+    if (!k) return new THREE.Color(COLORS.variable);
+    if (VARS[k].kind === 'nominal') return new THREE.Color(CAT_COLORS[(this.raw(r, k) - 1) % CAT_COLORS.length]);
+    const n = this.unit01(k, r);
+    const a = new THREE.Color(RAMP[0]), b = new THREE.Color(RAMP[1]), c = new THREE.Color(RAMP[2]);
+    return n < 0.5 ? a.lerp(b, n * 2) : b.lerp(c, (n - 0.5) * 2);
+  }
+
+  applyEncodings() {
+    const st = this.state;
+    if (!this.shapeGeos) {
+      this.shapeGeos = [new THREE.SphereGeometry(0.026, 16, 12), new THREE.BoxGeometry(0.044, 0.044, 0.044), new THREE.ConeGeometry(0.03, 0.06, 14), new THREE.OctahedronGeometry(0.034), new THREE.TorusGeometry(0.022, 0.009, 8, 18)];
+      this.pointLabels = [];
+    }
+    this.points.forEach((p, i) => {
+      const r = p.userData.row;
+      p.userData.baseColor = this.colorFor(st.colorVar, r);
+      p.userData.sizeK = 1;
+      p.geometry = st.shapeVar ? this.shapeGeos[(this.raw(r, st.shapeVar) - 1) % this.shapeGeos.length] : this.shapeGeos[0];
+      let lb = this.pointLabels[i];
+      const mode = this.labelMode || 'ocultar';
+      if (mode !== 'ocultar' && st.view !== 'parallel') {
+        const txt = this.pointName(r, mode);
+        if (!lb) { lb = makeLabel(txt, { height: 0.03, fontSize: 36, maxWidthPx: 1400 }); this.plot.add(lb); this.pointLabels[i] = lb; }
+        else if (lb.userData.text !== txt) lb.setText(txt);
+        lb.visible = true;
+      } else if (lb) lb.visible = false;
+    });
+    const showLeg = st.view !== 'parallel';
+    const catLine = (k, names) => VARS[k].cats.map((c, i) => `${names[i % names.length]} ${c}`).join(' · ');
+    if (st.colorVar) {
+      const v = VARS[st.colorVar];
+      this.colorLegend.setText(v.kind === 'nominal' ? `Color = ${v.label}: ${catLine(st.colorVar, CAT_NAMES)}` : `Color = ${v.label} (ordinal): naranja = ${v.cats[0]} → morado = ${v.cats[v.cats.length - 1]}`);
+      this.colorLegend.visible = true;
+    } else this.colorLegend.visible = false;
+    if (st.shapeVar && showLeg) { this.sizeLegend.setText(`Forma = ${VARS[st.shapeVar].label}: ${catLine(st.shapeVar, SHAPE_NAMES)}`); this.sizeLegend.visible = true; }
+    else this.sizeLegend.visible = false;
+    if (!this.labelLegend) { this.labelLegend = makeLabel('', { height: 0.05, border: '#0f172a', maxWidthPx: 1100 }); this.labelLegend.position.set(-1.45, 1.51, 0.3); this.root.add(this.labelLegend); }
+    const nums = st.numVars || [], cs = st.catVars || [];
+    if (this.labelMode === 'valores' && showLeg) {
+      this.labelLegend.setText(`Etiqueta = nombre (${nums.join(', ')}${cs.length ? ' | ' + cs.join(', ') : ''})`);
+      this.labelLegend.visible = true;
+    } else this.labelLegend.visible = false;
+  }
+
+  buildParallel() {
+    const st = this.state;
+    const P = this.par;
+    this.app.interaction.removeWhere((o) => o.userData && o.userData.parLine);
+    for (const c of [...P.children]) {
+      if (c === this.parMarkers) continue;
+      c.traverse((m) => { if (!m.isSprite) m.geometry?.dispose(); if (m.material) { m.material.map?.dispose(); m.material.dispose(); } });
+      P.remove(c);
+    }
+    const vars = st.parVars;
+    const k = vars.length;
+    const H = 1.35;
+    const W = THREE.MathUtils.clamp(0.34 * (k - 1), 1.0, 4.2);
+    const xs = vars.map((_, i) => (k === 1 ? 0 : -W / 2 + (i * W) / (k - 1)));
+    this.parGeom = { xs, H };
+    const kindColor = { nominal: COLORS.nominal, ordinal: COLORS.ordinal, discreta: COLORS.discrete, continua: COLORS.continuous };
+    vars.forEach((key, i) => {
+      const v = VARS[key], s = this.stats[key];
+      const g = new THREE.Group();
+      g.position.x = xs[i];
+      const ax = new THREE.Mesh(new THREE.CylinderGeometry(0.007, 0.007, H, 8), new THREE.MeshBasicMaterial({ color: kindColor[v.kind] || '#334155' }));
+      ax.position.y = H / 2;
+      const name = makeLabel(v.label, { height: 0.05, border: kindColor[v.kind] });
+      name.position.y = H + 0.08 + (i % 2) * 0.08;   // alterna alturas para que no se encimen
+      const fmt = (x) => (v.cats ? v.cats[Math.round(x) - 1] : x.toFixed(v.dec));
+      const lo = st.norm === 'z' && !v.cats ? s.mean - 3 * s.sd : s.min;
+      const hi = st.norm === 'z' && !v.cats ? s.mean + 3 * s.sd : s.max;
+      const top = makeLabel(fmt(hi), { height: 0.032, bold: false, fontSize: 36 });
+      top.position.set(0.07, H - 0.02, 0);
+      const bot = makeLabel(fmt(lo), { height: 0.032, bold: false, fontSize: 36 });
+      bot.position.set(0.07, 0.02, 0);
+      g.add(ax, name, top, bot);
+      P.add(g);
+    });
+    // Casos extremos: línea en 0 y línea en 10
+    for (const val of [0, 10]) {
+      const col = val === 0 ? '#0f172a' : '#dc2626';
+      const pts = vars.map((key, i) => new THREE.Vector3(xs[i], (VARS[key].cats ? 0 : val / 10) * H, 0.004));
+      const ln = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineDashedMaterial({ color: col, dashSize: 0.05, gapSize: 0.025 }));
+      ln.computeLineDistances();
+      const lb = makeLabel(val === 0 ? 'Mínimo · 0 en todo' : 'Máximo · 10 en todo', { height: 0.045, border: col });
+      lb.position.set(xs[0] - 0.32, (val / 10) * H, 0);
+      const g = new THREE.Group(); g.add(ln, lb); P.add(g);
+    }
+
+    // Una línea por estudiante
+    this.parLines = this.rows.map((r, idx) => {
+      const pts = vars.map((key, i) => {
+        let n = this.unit01(key, r);
+        if (VARS[key].kind === 'nominal') n += (((idx * 37) % 11) / 10 - 0.5) * 0.04;
+        return new THREE.Vector3(xs[i], n * H, 0);
+      });
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: this.colorFor(st.colorVar, r), transparent: true, opacity: 0.55 }));
+      line.userData = { parLine: true, i: idx, pts, hover: false };
+      P.add(line);
+      this.reg(line, { onSelect: () => this.select(idx), onHover: (on) => { line.userData.hover = on; } });
+      return line;
+    });
   }
 
   buildTicks(a, k) {
@@ -206,7 +565,7 @@ export default class Scene2 extends BaseScene {
     const ticks = [];
     if (v.cats) v.cats.forEach((c, i) => ticks.push({ val: i + 1, text: `${i + 1}·${c.slice(0, 5)}` }));
     else if (this.state.norm === 'z') [-2, -1, 0, 1, 2].forEach((z) => ticks.push({ val: s.mean + z * s.sd, text: `z=${z > 0 ? '+' : ''}${z} (${(s.mean + z * s.sd).toFixed(v.dec)})` }));
-    else [0, 0.25, 0.5, 0.75, 1].forEach((n) => ticks.push({ val: s.min + n * (s.max - s.min), text: `${n} (${(s.min + n * (s.max - s.min)).toFixed(v.dec)})` }));
+    else [0, 2.5, 5, 7.5, 10].forEach((x) => ticks.push({ val: x, text: String(x) }));
     const geo = new THREE.BoxGeometry(0.004, 0.035, 0.004);
     for (const t of ticks) {
       const c = this.toAxis(k, t.val);
@@ -225,18 +584,38 @@ export default class Scene2 extends BaseScene {
     const r = this.rows[i];
     const st = this.state;
     const rowsOut = [];
-    this.activeAxes().forEach((a) => {
-      const k = st.axes[a];
-      const raw = this.raw(r, k);
-      const shown = VARS[k].cats ? `${VARS[k].cats[raw - 1]} (código ${raw})` : `${raw} ${VARS[k].unit}`;
-      rowsOut.push([`${a.toUpperCase()} · ${VARS[k].label}`, `${shown} → ${st.norm === 'z' ? 'z' : 'n'} = ${this.normValue(k, raw).toFixed(2)}`]);
-    });
-    rowsOut.push(['Minutos en plataforma', `${r.minutos_plataforma} min`], ['Mensajes en foro', r.participaciones_foro], ['Sesiones sincrónicas', `${r.asistencia_sincronica} de 8`], ['Modalidad preferida', r.modalidad_preferida], ['Dominio de TIC', r.dominio_tic], ['Casos · carteles · ensayos · exposición', `${r.casos} · ${r.carteles} · ${r.ensayos} · ${r.exposicion}`], ['Calificación final', r.calificacion_final], ['Carrera', r.carrera]);
-    this.detail({ kicker: 'Estudiante ficticio', title: `${r.nombre} · ${r.id}`, rows: rowsOut, text: 'Las coordenadas son valores transformados; los valores originales se conservan en la tabla.' });
+    const shownOf = (k) => { const raw = this.raw(r, k); return VARS[k].cats ? `${VARS[k].cats[raw - 1]} (código ${raw})` : `${raw}  (${VARS[k].kind}, ${VARS[k].unit})`; };
+    if (st.view === 'parallel') {
+      st.parVars.forEach((k) => rowsOut.push([`${VARS[k].label}`, shownOf(k)]));
+    } else {
+      (st.numVars || []).forEach((k, i) => {
+        rowsOut.push([`Eje ${i < 3 ? 'XYZ'[i] : i + 1} · ${VARS[k].label}`, `${this.raw(r, k)} de 10`]);
+      });
+    }
+    if (st.colorVar) rowsOut.push([`Color · ${VARS[st.colorVar].label}`, r[st.colorVar]]);
+    if (st.shapeVar) rowsOut.push([`Forma · ${VARS[st.shapeVar].label}`, r[st.shapeVar]]);
+    (st.catVars || []).slice(2).forEach((k) => rowsOut.push([`${VARS[k].label} (categórica)`, r[k]]));
+    // (en esta versión solo hay variables genéricas v1, v2…)
+    this.detail({ kicker: 'Estudiante ficticio', title: this.pointName(r), rows: rowsOut, text: 'Todas las variables numéricas usan la misma escala de 0 a 10: cada valor indica qué tan lejos del origen avanza el punto en ese eje.' });
   }
 
   updateSelection() {
     const i = this.state.selected;
+    // Coordenadas paralelas: marcar los vértices de la línea seleccionada
+    for (const c of [...this.parMarkers.children]) { if (c.isSprite) { c.material.map?.dispose(); c.material.dispose(); } else c.geometry.dispose(); this.parMarkers.remove(c); }
+    if (this.state.view === 'parallel') {
+      this.halo.visible = false; this.projLines.visible = false; this.selLabel.visible = false;
+      const line = this.parLines?.[i];
+      if (line) {
+        const m = new THREE.MeshBasicMaterial({ color: '#0f172a' });
+        line.userData.pts.forEach((p) => { const d = new THREE.Mesh(new THREE.SphereGeometry(0.018, 10, 8), m); d.position.copy(p); this.parMarkers.add(d); });
+        const lbl = makeLabel(`${this.rows[i].nombre} (${this.rows[i].id})`, { height: 0.05, border: '#0f172a' });
+        const last = line.userData.pts[line.userData.pts.length - 1];
+        lbl.position.set(last.x + 0.25, last.y, 0);
+        this.parMarkers.add(lbl);
+      }
+      return;
+    }
     const p = this.points[i];
     const t = p.userData.target;
     this.halo.visible = true;
@@ -246,6 +625,17 @@ export default class Scene2 extends BaseScene {
     this.selLabel.position.copy(t).add(new THREE.Vector3(0, 0.09, 0));
     const pts = [];
     const d = this.state.dims;
+    if (this.starMode && this.starInfo) {
+      // Camino de la suma: el punto se construye avanzando por cada eje
+      const { vars, dirs, A } = this.starInfo;
+      const cur = new THREE.Vector3();
+      vars.forEach((k, j) => { const nx = cur.clone().addScaledVector(dirs[j], this.unit01(k, p.userData.row) * A); pts.push(cur.clone(), nx); cur.copy(nx); });
+      this.projLines.geometry.dispose();
+      this.projLines.geometry = new THREE.BufferGeometry().setFromPoints(pts);
+      this.projLines.computeLineDistances();
+      this.projLines.visible = true;
+      return;
+    }
     if (d >= 1) pts.push(t.clone(), new THREE.Vector3(t.x, 0, d >= 3 ? t.z : 0));
     if (d >= 2) pts.push(t.clone(), new THREE.Vector3(0, t.y, d >= 3 ? t.z : 0));
     if (d >= 3) pts.push(t.clone(), new THREE.Vector3(t.x, t.y, 0));
@@ -259,6 +649,7 @@ export default class Scene2 extends BaseScene {
     if (this.state.selected === null) return;
     this.state.selected = null;
     this.halo.visible = false; this.projLines.visible = false; this.selLabel.visible = false;
+    for (const c of [...this.parMarkers.children]) { if (c.isSprite) { c.material.map?.dispose(); c.material.dispose(); } else c.geometry?.dispose(); this.parMarkers.remove(c); }
     this.detail(null);
   }
 
@@ -270,37 +661,75 @@ export default class Scene2 extends BaseScene {
     return sxy / Math.sqrt(sxx * syy);
   }
 
-  // ---------- Secuencia didáctica ----------
+  // ---------- Secuencia didáctica: agregar variables v1, v2, v3… ----------
   getGuide() {
     const st = this.state;
-    const opts = Object.entries(VARS).map(([k, v]) => ({ value: k, label: v.label }));
-    const axisSel = (a) => ({ type: 'select', label: `Eje ${a.toUpperCase()}`, value: st.axes[a], options: opts, onChange: (v) => { st.axes[a] = v; this.layout(); this.refreshDetail(); } });
-    const set = (patch) => { Object.assign(st, patch); this.layout(); this.refreshDetail(); };
-    const r = (a, b) => this.pearson(st.axes[a], st.axes[b]).toFixed(2);
+    const n = this.vlist.length;
+    const nums = st.numVars || [], cats = st.catVars || [];
+    const m = nums.length;
+    const adds = { type: 'buttons', items: [
+      { label: '+ Continua', onClick: () => this.addVariable('continua') },
+      { label: '+ Discreta', onClick: () => this.addVariable('discreta') },
+      { label: '+ Nominal', onClick: () => this.addVariable('nominal') },
+      { label: '+ Ordinal', onClick: () => this.addVariable('ordinal') }] };
+    const del = { label: `− Quitar v${n}`, onClick: () => this.removeVariable() };
+    const on = this.labelMode === 'valores';
+    const labels = { label: on ? 'Ocultar coordenadas' : 'Mostrar coordenadas', vrLabel: on ? 'Ocultar coordenadas' : 'Mostrar coordenadas', active: on, onClick: () => this.toggleLabels(false) };
     const rot = { type: 'buttons', items: [{ label: '↺', vrLabel: '↺ Girar', onClick: () => { this.rotTarget += Math.PI / 8; } }, { label: '↻', vrLabel: '↻ Girar', onClick: () => { this.rotTarget -= Math.PI / 8; } }] };
+    const roles = ['color', 'forma', 'etiqueta'];
+    const catTxt = cats.length ? ` · ${cats.length} categórica${cats.length > 1 ? 's' : ''} → ${cats.slice(0, 3).map((k, i) => `${k} ${roles[i]}`).join(', ')}` : '';
+    const summary = `${n} variable${n > 1 ? 's' : ''}: ${m} numérica${m > 1 ? 's' : ''} = ${m} eje${m > 1 ? 's' : ''} (${nums.join(', ')})${catTxt}.`;
+    const r12 = m >= 2 ? this.pearson(nums[0], nums[1]).toFixed(2) : '—';
     return {
-      objective: 'Representar estudiantes como puntos en un espacio de variables.',
-      idea: 'Cada variable puede usarse como un eje: una dimensión de representación. Pero dos ejes no son necesariamente dos dimensiones conceptuales distintas: pueden medir casi lo mismo.',
+      objective: 'Ver que cada variable agrega una dimensión de representación.',
+      idea: 'Todas las variables numéricas usan la misma escala (0 a 10), así que sus valores se pueden comparar directamente. Cada variable numérica agrega un eje: una dimensión más. Hasta tres ejes pueden ser perpendiculares; desde el cuarto se dibujan en otras direcciones y cada punto es la suma de sus valores en cada eje. Las variables categóricas no son ejes: se representan con color, forma o etiqueta. Más ejes no significan necesariamente más ideas.',
       steps: [
-        { title: 'Una variable, un eje', icon: 'axes', prompt: 'Cada esfera es una estudiante. Su posición indica sus minutos en la plataforma.',
-          enter: () => set({ dims: 1, norm: 'minmax', axes: { x: 'minutos_plataforma', y: 'participaciones_foro', z: 'casos' } }),
-          actions: [axisSel('x')] },
-        { title: 'Agrega una segunda variable', icon: 'axes', prompt: 'Ahora cada estudiante tiene dos coordenadas. Toca una esfera para ver sus valores.',
-          enter: () => set({ dims: 2 }), actions: [axisSel('y')] },
-        { title: 'Entra en tres dimensiones', icon: 'cube', prompt: 'Gira el espacio o camina a su alrededor con las gafas. Cada punto es (x, y, z).',
-          enter: () => { set({ dims: 3 }); this.rotTarget += 0.6; }, actions: [axisSel('z'), rot] },
-        { title: 'Iguala las escalas', icon: 'scale', prompt: 'Minutos, mensajes y puntos tienen unidades distintas. Compara dos formas de normalizar.',
-          enter: () => set({ dims: 3 }),
-          actions: [{ type: 'buttons', items: [
-            { label: 'Mín–máx (0 a 1)', vrLabel: 'Mín–máx', active: st.norm === 'minmax', onClick: () => set({ norm: 'minmax' }) },
-            { label: 'Puntuación z', vrLabel: 'z', active: st.norm === 'z', onClick: () => set({ norm: 'z' }) }] },
-            { label: '¿Qué fórmula se usa?', onClick: () => this.showScaleFormula() }] },
-        { title: '¿Dos ejes, dos ideas?', icon: 'bulb', prompt: `${VARS[st.axes.x].label} y ${VARS[st.axes.y].label}: r = ${r('x', 'y')}. ¿Dos ejes significan dos ideas distintas?`,
-          enter: () => set({ dims: 2, axes: { ...st.axes, x: 'minutos_plataforma', y: 'participaciones_foro' } }),
-          actions: [{ label: 'Ver respuesta', primary: true, onClick: () => this.detail({ kicker: 'Reflexión', title: 'Dos ejes, una posible dimensión', text: ['Son dos variables distintas y ocupan dos ejes, pero ambas pueden reflejar una misma dimensión conceptual: la participación en línea.', 'Una correlación alta sugiere información compartida; decidir si es una sola dimensión requiere teoría y evidencia (escena 4).'] }) },
-            { label: 'Probar con estatura', onClick: () => set({ axes: { ...st.axes, y: 'estatura_cm' } }) }] },
+        { title: 'Una variable, un eje', icon: 'axes', prompt: 'Cada esfera es una estudiante. Con una sola variable numérica, v1, hay una sola dimensión: un eje.',
+          enter: () => { if (st.view !== 'cartesian') { st.view = 'cartesian'; this.layout(); this.app.setCameraPreset(this.cameraPreset); } },
+          actions: [labels] },
+        { title: 'Agrega variables', icon: 'layers', prompt: `${summary} Numéricas → ejes; categóricas → color, forma o etiqueta.`,
+          enter: () => { if (st.view !== 'cartesian') { st.view = 'cartesian'; this.layout(); this.app.setCameraPreset(this.cameraPreset); } },
+          actions: [adds, del, ...(m >= 2 ? [rot] : []), labels] },
+        { title: 'Más de tres ejes', icon: 'cube', prompt: m > 3
+            ? `${m} ejes: después del tercero ya no caben perpendiculares. Toca una esfera para ver cómo su posición suma un tramo en cada eje.`
+            : `Tienes ${m} eje${m > 1 ? 's' : ''}. Agrega variables numéricas hasta tener 4 o más y observa los nuevos ejes.`,
+          enter: () => {},
+          actions: [{ label: '+ Eje numérico', primary: true, onClick: () => this.addVariable('continua') }, del,
+            { type: 'buttons', items: [
+              { label: 'Ejes en el espacio', active: st.view === 'cartesian', onClick: () => { st.view = 'cartesian'; this.layout(); this.app.setCameraPreset(this.cameraPreset); } },
+              { label: 'Ejes paralelos', active: st.view === 'parallel', onClick: () => { if (m >= 2) { st.view = 'parallel'; this.layout(); this.app.setCameraPreset(PAR_CAMERA); } } }] },
+            { label: 'Seleccionar una estudiante', onClick: () => this.select(Math.floor(Math.random() * this.rows.length)) }, labels] },
+        { title: 'Interpreta un punto', icon: 'scale', prompt: `Todas las numéricas van de 0 a 10. El punto negro es el Mínimo (0 en todo) y el rojo, el Máximo (10 en todo). Lee una etiqueta: ${this.rows[0] ? this.pointName(this.rows[0]) : ''} significa ${nums.map((k) => k + ' = ' + (this.rows[0] ? this.rows[0][k] : '')).join(', ')}.`,
+          enter: () => {},
+          actions: [{ label: 'Seleccionar una estudiante', primary: true, onClick: () => this.select(Math.floor(Math.random() * this.rows.length)) },
+            { label: 'Comparar dos estudiantes', onClick: () => this.compareTwo() },
+            { label: 'Ver Mínimo', onClick: () => this.showRef(0) }, { label: 'Ver Máximo', onClick: () => this.showRef(10) }, labels] },
+        { title: '¿Dos ejes, dos ideas?', icon: 'bulb', prompt: m >= 2 ? `${nums[0]} y ${nums[1]}: r = ${r12}. ¿Dos ejes significan dos ideas distintas?` : 'Agrega al menos dos variables numéricas para comparar.',
+          enter: () => {},
+          actions: [
+            m < 2 ? { label: '+ Continua', onClick: () => this.addVariable('continua') } : null,
+            { label: 'Ver respuesta', primary: true, onClick: () => this.detail({ kicker: 'Reflexión', title: 'Más ejes ≠ más ideas', text: ['Cada variable numérica ocupa su propio eje, pero si dos están muy correlacionadas comparten mucha información: pueden reflejar una misma dimensión conceptual.', 'Decidir cuántas dimensiones conceptuales hay requiere teoría y evidencia (escena 4).'] }) },
+            m >= 2 ? { label: 'Ver correlaciones', onClick: () => this.showCorrelations() } : null, labels] },
       ],
     };
+  }
+
+  compareTwo() {
+    const a = Math.floor(Math.random() * this.rows.length);
+    let b = Math.floor(Math.random() * this.rows.length); if (b === a) b = (a + 1) % this.rows.length;
+    const ra = this.rows[a], rb = this.rows[b];
+    const st = this.state;
+    const rows = (st.numVars || []).map((k) => [k, `${ra[k]}  vs  ${rb[k]}  (${ra[k] > rb[k] ? ra.nombre : ra[k] < rb[k] ? rb.nombre : 'empate'})`]);
+    (st.catVars || []).forEach((k) => rows.push([k, `${ra[k]}  vs  ${rb[k]}`]));
+    this.select(a);
+    this.detail({ kicker: 'Comparación', title: `${ra.nombre} vs ${rb.nombre}`, rows, text: 'En cada eje gana quien tiene el valor más alto. Dos puntos cercanos tienen valores parecidos en la mayoría de las variables.' });
+  }
+
+  showCorrelations() {
+    const L = this.vlist.filter((k) => this.isNum(k));
+    const rows = [];
+    for (let i = 0; i < L.length && rows.length < 10; i++) for (let j = i + 1; j < L.length && rows.length < 10; j++) rows.push([`${L[i]} – ${L[j]}`, `r = ${this.pearson(L[i], L[j]).toFixed(2)}`]);
+    this.detail({ kicker: 'Correlaciones (datos ficticios)', title: 'Qué tanto se parecen los ejes', rows, text: 'Valores de r cercanos a 1 o a −1 indican que dos ejes comparten mucha información. Solo se incluyen variables numéricas.' });
   }
 
   showScaleFormula() {
@@ -390,14 +819,39 @@ export default class Scene2 extends BaseScene {
     this.pivot.rotation.y = THREE.MathUtils.lerp(this.pivot.rotation.y, this.rotTarget, f);
     const z = THREE.MathUtils.lerp(this.pivot.scale.x, this.zoomTarget, f);
     this.pivot.scale.setScalar(z);
+    if (this.plotTarget) this.plot.position.lerp(this.plotTarget, f);
+    if (this.refs) for (const g of this.refs) {
+      g.position.lerp(g.userData.target, f);
+      g.userData.ring.lookAt(this.app.camera.getWorldPosition(this._camW || (this._camW = new THREE.Vector3())));
+      g.userData.ring.scale.setScalar(1 + Math.sin(t * 2.5 + g.userData.val) * 0.08);
+    }
     for (const p of this.points) {
       p.position.lerp(p.userData.target, f);
+      const lb = this.pointLabels?.[p.userData.i];
+      if (lb && lb.visible) lb.position.copy(p.position).add(LABEL_OFF);
       const sel = p.userData.i === this.state.selected;
-      const s = sel ? 1.6 : p.userData.hover ? 1.4 : 1;
+      const s = (p.userData.sizeK || 1) * (sel ? 1.6 : p.userData.hover ? 1.4 : 1);
       p.scale.setScalar(THREE.MathUtils.lerp(p.scale.x, s, f));
       p.material.emissiveIntensity = sel ? 0.9 : p.userData.hover ? 0.7 : 0.25;
-      if (sel) p.material.color.set('#ffffff'); else p.material.color.set(COLORS.variable);
+      if (sel) p.material.color.set('#0f172a'); else p.material.color.copy(p.userData.baseColor || new THREE.Color(COLORS.variable));
+      p.material.emissive.copy(p.material.color);
+    }
+    if (this.par.visible && this.parLines) {
+      for (const L of this.parLines) {
+        const sel = L.userData.i === this.state.selected;
+        const m = L.material;
+        m.opacity = sel ? 1 : L.userData.hover ? 0.95 : (this.state.selected !== null ? 0.18 : 0.55);
+        if (sel) m.color.set('#0f172a'); else m.color.copy(this.colorFor(this.state.colorVar, this.rows[L.userData.i]));
+        L.renderOrder = sel ? 5 : 1;
+      }
     }
     if (this.halo.visible) { this.halo.position.copy(this.points[this.state.selected].position); this.halo.lookAt(this.app.camera.getWorldPosition(new THREE.Vector3())); this.halo.scale.setScalar(1 + Math.sin(t * 4) * 0.1); }
   }
 }
+
+const PAR_CAMERA = { position: [0, 1.45, 1.6], target: [0, 1.25, -1.65] };
+function mulberry32(a) { return function () { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+function gauss(rng) { let u = 0; while (u === 0) u = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rng()); }
+const STAR_COLORS = ['#ef4444', '#22c55e', '#3b82f6', '#f59e0b', '#8b5cf6', '#14b8a6', '#ec4899', '#64748b', '#84cc16', '#0ea5e9'];
+const SHAPE_NAMES = ['esfera', 'cubo', 'cono', 'octaedro', 'anillo'];
+const LABEL_OFF = new THREE.Vector3(0, 0.065, 0);
