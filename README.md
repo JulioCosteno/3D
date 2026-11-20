@@ -1,4 +1,23 @@
-# Laboratorio de variables · versión de diseño instruccional (v2.1)
+# Laboratorio de variables · variables ampliadas (v2.2)
+
+**Novedad de la v2.2 (escena 2):** las variables no tienen nombre; se llaman **v1, v2, v3…** y el grupo las
+va agregando con los botones **+ Continua, + Discreta, + Nominal, + Ordinal**.
+
+- **Cada variable numérica es un eje** (una dimensión): 1 variable = 1 eje, 2 = 2 ejes, 3 = 3 ejes
+  perpendiculares (X, Y, Z). Desde la 4.ª, los ejes salen del mismo origen en otras direcciones (coordenadas
+  en estrella) y cada estudiante se ubica **sumando un tramo en cada eje**. Al seleccionarla se dibuja ese
+  camino. Es una proyección: dos estudiantes distintas pueden quedar cerca.
+- **Las variables categóricas no son ejes:** la 1.ª se muestra como **color**, la 2.ª como **forma** (esfera,
+  cubo, cono, octaedro, anillo) y la 3.ª como **etiqueta**. Las demás aparecen en la ficha de la estudiante.
+- Vista alternativa de **ejes paralelos**, con todas las variables numéricas, una junto a otra.
+- Los valores son ficticios, con escalas distintas (×1, ×10, ×100, ×1000) y correlaciones variables, para
+  discutir la normalización y si más ejes implican más ideas.
+
+Las escenas 1, 3 y 4 son iguales a las de la v2.1.
+
+---
+
+## Base: versión de diseño instruccional (v2.1)
 
 Esta carpeta es una **variante** de `version_2_generada_por_Claude`, que no se modificó. Tiene el mismo
 contenido y las mismas cuatro escenas, pero con otra interfaz:
@@ -19,7 +38,7 @@ guiar → practicar → retroalimentar → cerrar.
 | Escena | Pasos |
 |---|---|
 | 1 · Variables | Observa la situación → Descubre las variables → Del caso al modelo → Comprueba (7 preguntas) → Compara con una persona |
-| 2 · Dimensiones | Una variable, un eje → Segunda variable → Tres dimensiones → Iguala las escalas → ¿Dos ejes, dos ideas? |
+| 2 · Dimensiones | Una variable, un eje → Segunda variable → Tres dimensiones → Iguala las escalas → Cuarta y quinta variable (color y tamaño) → Tantas variables como quieras (coordenadas paralelas) → ¿Dos ejes, dos ideas? |
 | 3 · Tipos | Recorre las estaciones → ¿Los códigos son cantidades? → Clasifica (13 tarjetas) |
 | 4 · Constructos | Lo que no se ve → Explora los indicadores → Las flechas son hipótesis → ¿Qué evidencia falta? |
 
